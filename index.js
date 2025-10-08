@@ -5,8 +5,8 @@ import { Octokit } from "@octokit/rest";
 
 // === Веб-сервер для Render ===
 const app = express();
-app.get("/", (req, res) => res.send("✅ RealNameBot is running and ready to serve your Discord server!"));
-const PORT = process.env.PORT || 3000;
+app.get("/", (req, res) => res.send("Bot is running!"));
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`🌐 Web server is online on port ${PORT}`));
 
 // === Переменные окружения ===
@@ -14,54 +14,63 @@ const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO = process.env.GITHUB_REPO || "hundetigern/realname-bot";
+const GITHUB_REPO = process.env.GITHUB_REPO || "hundetigern/realname-bot"; // <-- твой репозиторий
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !GITHUB_TOKEN) {
-  console.error("❌ Не заданы DISCORD_BOT_TOKEN, CLIENT_ID, GUILD_ID или GITHUB_TOKEN");
+  console.error("❌ Отсутствуют необходимые переменные окружения");
   process.exit(1);
 }
 
-const [owner, repo] = GITHUB_REPO.split("/");
+// === GitHub клиент ===
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
+const [owner, repo] = GITHUB_REPO.split("/");
 
-// === Файл с именами ===
+// === Работа с файлом ===
 const dataFile = "./data/names.json";
-let names = fs.existsSync(dataFile)
-  ? JSON.parse(fs.readFileSync(dataFile, "utf8"))
-  : {};
+let names = {};
 
-// === Инициализация клиента Discord ===
+if (fs.existsSync(dataFile)) {
+  try {
+    names = JSON.parse(fs.readFileSync(dataFile, "utf8"));
+  } catch {
+    names = {};
+  }
+} else {
+  fs.mkdirSync("./data", { recursive: true });
+  fs.writeFileSync(dataFile, "{}");
+}
+
+// === Discord клиент ===
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessages
   ],
 });
 
-// === Регистрация команд ===
+// === Команды ===
 const commands = [
   new SlashCommandBuilder()
-    .setName("ping")
-    .setDescription("Проверить, жив ли бот и в каком он настроении"),
-  new SlashCommandBuilder()
     .setName("setrealname")
-    .setDescription("Устанавливает реальное имя (только VIP может менять чужие)")
+    .setDescription("Устанавливает реальное имя для себя или другого пользователя (только VIP)")
     .addStringOption(option =>
       option.setName("name").setDescription("Реальное имя").setRequired(true)
     )
     .addUserOption(option =>
-      option.setName("target").setDescription("Пользователь").setRequired(false)
+      option.setName("target").setDescription("Пользователь (опционально)").setRequired(false)
     ),
   new SlashCommandBuilder()
     .setName("removerealname")
-    .setDescription("Удаляет реальное имя у пользователя")
-    .addUserOption(option =>
-      option.setName("target").setDescription("Пользователь").setRequired(false)
-    ),
-].map(c => c.toJSON());
+    .setDescription("Удаляет реальное имя пользователя"),
+  new SlashCommandBuilder()
+    .setName("ping")
+    .setDescription("Проверить, жив ли бот"),
+];
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
+
+// === Регистрация команд ===
 (async () => {
   try {
     console.log("⏳ Регистрирую команды...");
@@ -76,112 +85,94 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === "ping") {
-    await interaction.reply({
+  const { commandName } = interaction;
+
+  if (commandName === "ping") {
+    return interaction.reply({
       content: "🏓 Понг! Всё отлично — бот жив, бодр, и готов управлять реальными именами пользователей 😎",
       ephemeral: true
     });
   }
 
-  if (interaction.commandName === "setrealname") {
+  if (commandName === "setrealname") {
     const name = interaction.options.getString("name");
     const target = interaction.options.getUser("target") || interaction.user;
 
-    // Проверка VIP
     if (target.id !== interaction.user.id) {
       const member = await interaction.guild.members.fetch(interaction.user.id);
       if (!member.roles.cache.some(r => r.name === "🤴VIP👸")) {
-        return interaction.reply({ content: "❌ Нет прав менять имя других!", ephemeral: true });
+        return interaction.reply({
+          content: "❌ У вас нет права изменять имя других пользователей!",
+          ephemeral: true
+        });
       }
     }
 
     names[target.id] = name;
     fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
 
-    try {
-      const content = Buffer.from(JSON.stringify(names, null, 2)).toString("base64");
-      let sha;
-      try {
-        const res = await octokit.repos.getContent({ owner, repo, path: "data/names.json" });
-        sha = res.data.sha;
-      } catch {
-        sha = undefined;
-      }
-
-      await octokit.repos.createOrUpdateFileContents({
-        owner,
-        repo,
-        path: "data/names.json",
-        message: `Update names.json for ${target.username}`,
-        content,
-        sha,
-      });
-
-      console.log("✅ names.json успешно обновлён на GitHub");
-    } catch (err) {
-      console.error("⚠️ Ошибка при обновлении GitHub:", err.message);
-    }
-
-    await interaction.guild.members.fetch();
-    const memberTarget = interaction.guild.members.cache.get(target.id);
-    const baseNick = memberTarget.displayName.split(" | ")[0].slice(0, 25);
-    const newNick = `${baseNick} | ${name}`.slice(0, 32);
+    const memberTarget = await interaction.guild.members.fetch(target.id);
+    const baseNick = memberTarget.displayName.split(" | ")[0];
+    const shortBase = baseNick.slice(0, 25 - name.length); // чтобы не превышать лимит
+    const newNick = `${shortBase} | ${name}`;
 
     try {
       await memberTarget.setNickname(newNick);
-      await interaction.reply({ content: `✅ Реальное имя для ${target.username}: **${name}**`, ephemeral: true });
-    } catch {
-      await interaction.reply({ content: "❌ Не удалось изменить ник.", ephemeral: true });
+      await interaction.reply({
+        content: `✅ Реальное имя для ${target.username} установлено: **${name}**`,
+        ephemeral: true
+      });
+      await updateGitHubFile();
+    } catch (err) {
+      console.error(err);
+      await interaction.reply({
+        content: "❌ Не удалось изменить ник. Проверьте права бота.",
+        ephemeral: true
+      });
     }
   }
 
-  if (interaction.commandName === "removerealname") {
-    const target = interaction.options.getUser("target") || interaction.user;
-
-    if (!names[target.id]) {
-      return interaction.reply({ content: "❌ У этого пользователя нет реального имени.", ephemeral: true });
+  if (commandName === "removerealname") {
+    const userId = interaction.user.id;
+    if (!names[userId]) {
+      return interaction.reply({
+        content: "❌ Реальное имя у этого пользователя не установлено.",
+        ephemeral: true
+      });
     }
 
-    delete names[target.id];
+    delete names[userId];
     fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
 
-    try {
-      const content = Buffer.from(JSON.stringify(names, null, 2)).toString("base64");
-      const res = await octokit.repos.getContent({ owner, repo, path: "data/names.json" });
+    const member = await interaction.guild.members.fetch(userId);
+    const baseNick = member.displayName.split(" | ")[0];
 
-      await octokit.repos.createOrUpdateFileContents({
-        owner,
-        repo,
-        path: "data/names.json",
-        message: `Remove name for ${target.username}`,
-        content,
-        sha: res.data.sha,
+    try {
+      await member.setNickname(baseNick);
+      await interaction.reply({
+        content: "✅ Реальное имя удалено.",
+        ephemeral: true
       });
-
-      console.log("✅ Удалено имя и обновлён GitHub");
+      await updateGitHubFile();
     } catch (err) {
-      console.error("⚠️ Ошибка при обновлении GitHub:", err.message);
-    }
-
-    const memberTarget = await interaction.guild.members.fetch(target.id);
-    const baseNick = memberTarget.displayName.split(" | ")[0];
-    try {
-      await memberTarget.setNickname(baseNick);
-      await interaction.reply({ content: `🧹 Реальное имя удалено у ${target.username}`, ephemeral: true });
-    } catch {
-      await interaction.reply({ content: "⚠️ Не удалось обновить ник.", ephemeral: true });
+      console.error(err);
+      await interaction.reply({
+        content: "⚠️ Не удалось обновить ник, но имя удалено из базы.",
+        ephemeral: true
+      });
     }
   }
 });
 
-// === Автоматическое восстановление ===
+// === Восстановление ников ===
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   const id = newMember.id;
   if (!names[id]) return;
 
   const realName = names[id];
-  const baseNick = newMember.displayName.split(" | ")[0].slice(0, 25);
-  const expected = `${baseNick} | ${realName}`.slice(0, 32);
+  const baseNick = newMember.displayName.split(" | ")[0];
+  const shortBase = baseNick.slice(0, 25 - realName.length);
+  const expected = `${shortBase} | ${realName}`;
 
   if (newMember.nickname !== expected) {
     try {
@@ -193,5 +184,33 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
   }
 });
 
-client.once("ready", () => console.log(`🤖 Бот запущен как ${client.user.tag}`));
+// === Функция автосейва на GitHub ===
+async function updateGitHubFile() {
+  try {
+    const content = fs.readFileSync(dataFile, "utf8");
+    const { data: file } = await octokit.repos.getContent({ owner, repo, path: "data/names.json" });
+
+    await octokit.repos.createOrUpdateFileContents({
+      owner,
+      repo,
+      path: "data/names.json",
+      message: "Автосейв: обновлены реальные имена",
+      content: Buffer.from(content).toString("base64"),
+      sha: file.sha
+    });
+
+    console.log("✅ names.json успешно обновлён на GitHub");
+  } catch (err) {
+    console.error("⚠️ Ошибка при обновлении names.json:", err.message);
+  }
+}
+
+// === Автосейв каждые 5 минут ===
+setInterval(updateGitHubFile, 5 * 60 * 1000);
+
+// === Запуск ===
+client.once("ready", () => {
+  console.log(`🤖 Бот запущен как ${client.user.tag}`);
+});
+
 client.login(TOKEN);
