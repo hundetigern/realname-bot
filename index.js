@@ -5,7 +5,7 @@ import { Octokit } from "@octokit/rest";
 
 // === Веб-сервер для Render ===
 const app = express();
-app.get("/", (req, res) => res.send("Bot is running!"));
+app.get("/", (req, res) => res.send("✅ RealNameBot is running and ready to serve your Discord server!"));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🌐 Web server is online on port ${PORT}`));
 
@@ -24,7 +24,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID || !GITHUB_TOKEN) {
 const [owner, repo] = GITHUB_REPO.split("/");
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
-// === Локальный файл с именами ===
+// === Файл с именами ===
 const dataFile = "./data/names.json";
 let names = fs.existsSync(dataFile)
   ? JSON.parse(fs.readFileSync(dataFile, "utf8"))
@@ -43,7 +43,7 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName("ping")
-    .setDescription("Проверить, жив ли бот"),
+    .setDescription("Проверить, жив ли бот и в каком он настроении"),
   new SlashCommandBuilder()
     .setName("setrealname")
     .setDescription("Устанавливает реальное имя (только VIP может менять чужие)")
@@ -77,7 +77,10 @@ client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === "ping") {
-    await interaction.reply({ content: "🏓 Бот на связи!", ephemeral: true });
+    await interaction.reply({
+      content: "🏓 Понг! Всё отлично — бот жив, бодр, и готов управлять реальными именами пользователей 😎",
+      ephemeral: true
+    });
   }
 
   if (interaction.commandName === "setrealname") {
@@ -92,15 +95,11 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    // Сохраняем имя локально
     names[target.id] = name;
     fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
 
-    // Пытаемся отправить обновлённый файл в GitHub
     try {
       const content = Buffer.from(JSON.stringify(names, null, 2)).toString("base64");
-
-      // Получаем SHA, если файл уже существует
       let sha;
       try {
         const res = await octokit.repos.getContent({ owner, repo, path: "data/names.json" });
@@ -123,10 +122,9 @@ client.on("interactionCreate", async interaction => {
       console.error("⚠️ Ошибка при обновлении GitHub:", err.message);
     }
 
-    // Меняем ник
     await interaction.guild.members.fetch();
     const memberTarget = interaction.guild.members.cache.get(target.id);
-    const baseNick = memberTarget.displayName.split(" | ")[0].slice(0, 25); // ограничим длину
+    const baseNick = memberTarget.displayName.split(" | ")[0].slice(0, 25);
     const newNick = `${baseNick} | ${name}`.slice(0, 32);
 
     try {
