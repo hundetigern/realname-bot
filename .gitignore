@@ -1,2 +1,20 @@
-data/names.json
+# Node.js зависимости
 node_modules/
+
+# Логи Node.js
+*.log
+
+# Временные файлы
+*.tmp
+*.temp
+
+# Кэш редакторов/IDE
+.vscode/
+.idea/
+
+# Файлы окружения (если добавишь .env)
+.env
+
+# Игнорируем всё в папке data, кроме names.json
+data/*
+!data/names.json
