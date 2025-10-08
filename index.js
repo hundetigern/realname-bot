@@ -1,8 +1,8 @@
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
-import fs from "fs";
+import fetch from "node-fetch";
 import express from "express";
 
-// === Веб-сервер для Render / Replit ===
+// === Веб-сервер для Render ===
 const app = express();
 app.get("/", (req, res) => res.send("Bot is running!"));
 const PORT = process.env.PORT || 3000;
@@ -12,13 +12,16 @@ app.listen(PORT, () => console.log(`Web server is online on port ${PORT}`));
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO;
+const GITHUB_FILE = process.env.GITHUB_FILE || "names.json";
 
-if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error("❌ Не заданы DISCORD_BOT_TOKEN, CLIENT_ID или GUILD_ID");
+if (!TOKEN || !CLIENT_ID || !GUILD_ID || !GITHUB_TOKEN || !GITHUB_REPO) {
+  console.error("❌ Не заданы все необходимые переменные окружения");
   process.exit(1);
 }
 
-// === Инициализация клиента ===
+// === Инициализация клиента Discord ===
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -27,43 +30,63 @@ const client = new Client({
   ],
 });
 
-// === Работа с файлами имен ===
-const dataFile = "./names.json";
-let names = fs.existsSync(dataFile)
-  ? JSON.parse(fs.readFileSync(dataFile, "utf8"))
-  : {};
+// === GitHub: загрузка и сохранение names.json ===
+let names = {};
 
-// === Команды бота ===
+async function loadNames() {
+  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${GITHUB_FILE}`;
+  const res = await fetch(url, { headers: { Authorization: `token ${GITHUB_TOKEN}` } });
+  const data = await res.json();
+  if (data.content) {
+    const buff = Buffer.from(data.content, "base64");
+    names = JSON.parse(buff.toString("utf-8"));
+    console.log("✅ Names loaded from GitHub");
+  }
+}
+
+async function saveNames() {
+  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${GITHUB_FILE}`;
+  const res = await fetch(url, { headers: { Authorization: `token ${GITHUB_TOKEN}` } });
+  const data = await res.json();
+  const sha = data.sha;
+
+  const body = {
+    message: "Update names.json via bot",
+    content: Buffer.from(JSON.stringify(names, null, 2)).toString("base64"),
+    sha,
+  };
+
+  await fetch(url, { method: "PUT", headers: { Authorization: `token ${GITHUB_TOKEN}` }, body: JSON.stringify(body) });
+  console.log("✅ Names saved to GitHub");
+}
+
+// === Регистрация команд /setrealname и /removerealname ===
 const commands = [
   new SlashCommandBuilder()
     .setName("setrealname")
-    .setDescription("Устанавливает реальное имя для себя или другого пользователя (только VIP)")
+    .setDescription("Устанавливает реальное имя для себя или другого пользователя (VIP)")
     .addStringOption(option =>
       option.setName("name")
-            .setDescription("Реальное имя (может быть из нескольких слов)")
+            .setDescription("Реальное имя")
             .setRequired(true)
     )
     .addUserOption(option =>
       option.setName("target")
-            .setDescription("Пользователь, чьё имя вы хотите изменить")
+            .setDescription("Пользователь, чьё имя изменить")
             .setRequired(false)
     ),
   new SlashCommandBuilder()
     .setName("removerealname")
-    .setDescription("Удаляет реальное имя у себя или у другого пользователя (только VIP)")
+    .setDescription("Удаляет реальное имя для себя или другого пользователя (VIP)")
     .addUserOption(option =>
       option.setName("target")
-            .setDescription("Пользователь, у которого удалить имя")
+            .setDescription("Пользователь, чьё имя удалить")
             .setRequired(false)
-    ),
-  new SlashCommandBuilder()
-    .setName("ping")
-    .setDescription("Проверка работы бота")
+    )
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-// === Регистрация команд ===
 (async () => {
   try {
     console.log("⏳ Регистрирую команды...");
@@ -76,104 +99,85 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 // === Обработка команд ===
 client.on("interactionCreate", async interaction => {
-  try {
-    if (!interaction.isChatInputCommand()) return;
+  if (!interaction.isChatInputCommand()) return;
 
-    const command = interaction.commandName;
+  await loadNames(); // подгружаем актуальные имена
 
-    if (command === "ping") {
-      return interaction.reply({ content: "🏓 Pong!", ephemeral: true });
-    }
+  // --- /setrealname ---
+  if (interaction.commandName === "setrealname") {
+    const name = interaction.options.getString("name");
+    const target = interaction.options.getUser("target") || interaction.user;
 
-    if (command === "setrealname") {
-      const name = interaction.options.getString("name");
-      const target = interaction.options.getUser("target") || interaction.user;
-
-      if (target.id !== interaction.user.id) {
-        const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.roles.cache.some(r => r.name === "🤴VIP👸")) {
-          return interaction.reply({ content: "❌ У вас нет права изменять имя других пользователей!", ephemeral: true });
-        }
-      }
-
-      names[target.id] = name;
-      fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
-
-      await interaction.guild.members.fetch();
-      const memberTarget = interaction.guild.members.cache.get(target.id);
-      const baseNick = memberTarget.displayName.split(" | ")[0];
-      const newNick = `${baseNick} | ${name}`;
-
-      try {
-        await memberTarget.setNickname(newNick);
-        await interaction.reply({ content: `✅ Реальное имя для ${target.username} установлено: **${name}**`, ephemeral: true });
-      } catch (err) {
-        console.error(err);
-        await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
+    // Проверка VIP
+    if (target.id !== interaction.user.id) {
+      const member = await interaction.guild.members.fetch(interaction.user.id);
+      if (!member.roles.cache.some(r => r.name === "🤴VIP👸")) {
+        return interaction.reply({ content: "❌ Нет права изменять чужие имена!", ephemeral: true });
       }
     }
 
-    if (command === "removerealname") {
-      const target = interaction.options.getUser("target") || interaction.user;
+    names[target.id] = name;
 
-      if (target.id !== interaction.user.id) {
-        const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.roles.cache.some(r => r.name === "🤴VIP👸")) {
-          return interaction.reply({ content: "❌ У вас нет права удалять имя других пользователей!", ephemeral: true });
-        }
-      }
+    // Меняем ник
+    await interaction.guild.members.fetch();
+    const memberTarget = interaction.guild.members.cache.get(target.id);
+    const baseNick = memberTarget.displayName.split(" | ")[0];
+    const newNick = `${baseNick} | ${name}`;
+    try {
+      await memberTarget.setNickname(newNick);
+      await saveNames();
+      await interaction.reply({ content: `✅ Реальное имя для ${target.username} установлено: **${name}**`, ephemeral: true });
+    } catch {
+      await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
+    }
+  }
 
-      if (!names[target.id]) {
-        return interaction.reply({ content: "❌ Реальное имя у этого пользователя не установлено.", ephemeral: true });
-      }
+  // --- /removerealname ---
+  if (interaction.commandName === "removerealname") {
+    const target = interaction.options.getUser("target") || interaction.user;
 
-      delete names[target.id];
-      fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
-
-      await interaction.guild.members.fetch();
-      const memberTarget = interaction.guild.members.cache.get(target.id);
-      const baseNick = memberTarget.displayName.split(" | ")[0];
-
-      try {
-        await memberTarget.setNickname(baseNick);
-        await interaction.reply({ content: `✅ Реальное имя для ${target.username} удалено`, ephemeral: true });
-      } catch (err) {
-        console.error(err);
-        await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
+    if (target.id !== interaction.user.id) {
+      const member = await interaction.guild.members.fetch(interaction.user.id);
+      if (!member.roles.cache.some(r => r.name === "🤴VIP👸")) {
+        return interaction.reply({ content: "❌ Нет права удалять чужие имена!", ephemeral: true });
       }
     }
-  } catch (err) {
-    console.error("Ошибка при обработке команды:", err);
-    if (interaction && interaction.reply) {
-      await interaction.reply({ content: "❌ Произошла ошибка при обработке команды.", ephemeral: true });
+
+    if (!names[target.id]) return interaction.reply({ content: "❌ Реальное имя у этого пользователя не установлено.", ephemeral: true });
+
+    delete names[target.id];
+
+    // Восстанавливаем базовый ник
+    await interaction.guild.members.fetch();
+    const memberTarget = interaction.guild.members.cache.get(target.id);
+    const baseNick = memberTarget.displayName.split(" | ")[0];
+    try {
+      await memberTarget.setNickname(baseNick);
+      await saveNames();
+      await interaction.reply({ content: `✅ Реальное имя для ${target.username} удалено.`, ephemeral: true });
+    } catch {
+      await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
     }
   }
 });
 
-// === Автообновление ников ===
+// === Автообновление ника при ручной смене ===
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
-  try {
-    const id = newMember.id;
-    if (!names[id]) return;
-    const realName = names[id];
-    const baseNick = newMember.displayName.split(" | ")[0];
-    const expected = `${baseNick} | ${realName}`;
-    if (newMember.nickname !== expected) {
-      await newMember.setNickname(expected);
-      console.log(`🔁 Ник обновлён для ${newMember.user.username} → ${expected}`);
-    }
-  } catch (err) {
-    console.error("⚠️ Не удалось обновить ник при событии guildMemberUpdate:", err);
+  await loadNames();
+  const id = newMember.id;
+  if (!names[id]) return;
+  const realName = names[id];
+  const baseNick = newMember.displayName.split(" | ")[0];
+  const expected = `${baseNick} | ${realName}`;
+  if (newMember.nickname !== expected) {
+    try { await newMember.setNickname(expected); console.log(`🔁 Ник обновлён для ${newMember.user.username} → ${expected}`); }
+    catch { console.log(`⚠️ Не удалось обновить ник для ${newMember.user.username}`); }
   }
 });
 
-// === Логирование ошибок подключения ===
-client.on("error", console.error);
-client.on("shardError", console.error);
-
-client.once("ready", () => {
+// === Запуск ===
+client.once("clientReady", () => {
   console.log(`🤖 Бот запущен как ${client.user.tag}`);
-  console.log("✅ Подключение к Discord успешно!");
 });
 
 client.login(TOKEN);
