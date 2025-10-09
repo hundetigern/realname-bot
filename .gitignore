@@ -12,9 +12,10 @@ node_modules/
 .vscode/
 .idea/
 
-# Файлы окружения (если добавить .env)
+# Файлы окружения
 .env
 
 # Игнорируем всё в папке data, кроме names.json
 data/*
 !data/names.json
+!data/  # убедиться, что папка data сама отслеживается
