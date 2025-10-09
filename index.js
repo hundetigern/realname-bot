@@ -24,7 +24,11 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID || !GITHUB_TOKEN) {
 
 // === Инициализация клиента ===
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+  ],
 });
 
 // === Инициализация GitHub ===
@@ -36,60 +40,51 @@ let names = fs.existsSync(dataFile)
   ? JSON.parse(fs.readFileSync(dataFile, "utf8"))
   : {};
 
-// === Сохранение names.json на GitHub с защитой от конфликтов ===
-async function saveNamesToGitHub(retry = 0) {
+// === Сохранение names.json на GitHub ===
+async function saveNamesToGitHub() {
   try {
     fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
 
-    const { data: fileData } = await octokit.repos.getContent({
-      owner: GITHUB_REPO.split("/")[0],
-      repo: GITHUB_REPO.split("/")[1],
-      path: GITHUB_FILE_PATH,
-    });
+    let sha = null;
+    try {
+      const { data: fileData } = await octokit.repos.getContent({
+        owner: GITHUB_REPO.split("/")[0],
+        repo: GITHUB_REPO.split("/")[1],
+        path: GITHUB_FILE_PATH,
+      });
+      sha = fileData.sha;
+    } catch (err) {
+      if (err.status !== 404) throw err;
+    }
 
     await octokit.repos.createOrUpdateFileContents({
       owner: GITHUB_REPO.split("/")[0],
       repo: GITHUB_REPO.split("/")[1],
       path: GITHUB_FILE_PATH,
-      message: "Автосейв реальных имён",
+      message: "Обновлены реальные имена пользователей",
       content: Buffer.from(JSON.stringify(names, null, 2)).toString("base64"),
-      sha: fileData.sha,
+      sha: sha || undefined,
     });
 
-    console.log("✅ names.json успешно обновлён на GitHub");
+    console.log("✅ names.json успешно сохранён на GitHub");
   } catch (err) {
-    if (err.status === 409 && retry < 3) {
-      console.warn("⚠️ Конфликт SHA при сохранении. Повтор через 10 сек...");
-      setTimeout(() => saveNamesToGitHub(retry + 1), 10000);
-    } else if (err.status === 404) {
-      await octokit.repos.createOrUpdateFileContents({
-        owner: GITHUB_REPO.split("/")[0],
-        repo: GITHUB_REPO.split("/")[1],
-        path: GITHUB_FILE_PATH,
-        message: "Создан names.json",
-        content: Buffer.from(JSON.stringify(names, null, 2)).toString("base64"),
-      });
-      console.log("✅ names.json создан на GitHub");
-    } else {
-      console.error("❌ Ошибка при сохранении names.json на GitHub:", err.message);
-    }
+    console.error("❌ Ошибка при сохранении names.json на GitHub:", err);
   }
 }
-
-// === Автосейв каждые 10 минут ===
-setInterval(saveNamesToGitHub, 10 * 60 * 1000);
 
 // === Регистрация команд ===
 const commands = [
   new SlashCommandBuilder()
     .setName("setrealname")
     .setDescription("Устанавливает реальное имя для себя или другого пользователя (только VIP)")
-    .addStringOption(o => o.setName("name").setDescription("Реальное имя").setRequired(true))
-    .addUserOption(o => o.setName("target").setDescription("Кому изменить имя").setRequired(false)),
+    .addStringOption(option => option.setName("name").setDescription("Реальное имя").setRequired(true))
+    .addUserOption(option => option.setName("target").setDescription("Кому изменить имя").setRequired(false)),
+
   new SlashCommandBuilder()
     .setName("removerealname")
     .setDescription("Удаляет реальное имя пользователя")
-    .addUserOption(o => o.setName("target").setDescription("Кого удалить").setRequired(false)),
+    .addUserOption(option => option.setName("target").setDescription("Кого удалить").setRequired(false)),
+
   new SlashCommandBuilder()
     .setName("ping")
     .setDescription("Проверка работы бота"),
@@ -110,63 +105,65 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  try {
-    const target = interaction.options.getUser("target") || interaction.user;
+  const target = interaction.options.getUser("target") || interaction.user;
 
-    if (interaction.commandName === "setrealname") {
-      const name = interaction.options.getString("name");
+  if (interaction.commandName === "setrealname") {
+    const name = interaction.options.getString("name");
+
+    // Проверка на VIP
+    if (target.id !== interaction.user.id) {
       const member = await interaction.guild.members.fetch(interaction.user.id);
-
-      if (target.id !== interaction.user.id && !member.roles.cache.some(r => r.name === "🤴VIP👸")) {
-        return await interaction.reply({ content: "❌ Нет права изменять чужие имена!", flags: 64 });
-      }
-
-      const MAX_NICK_LENGTH = 32;
-      const memberTarget = await interaction.guild.members.fetch(target.id);
-      const baseNick = memberTarget.displayName.split(" | ")[0];
-      const extraLength = 3 + name.length;
-      const baseNickTrimmed = baseNick.length + extraLength > MAX_NICK_LENGTH
-        ? baseNick.substring(0, MAX_NICK_LENGTH - extraLength)
-        : baseNick;
-      const newNick = `${baseNickTrimmed} | ${name}`;
-
-      names[target.id] = name;
-      fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
-
-      try {
-        await memberTarget.setNickname(newNick);
-        await interaction.reply({ content: `✅ Реальное имя для ${target.username} установлено: **${name}**`, flags: 64 });
-      } catch {
-        await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", flags: 64 });
+      if (!member.roles.cache.some(r => r.name === "🤴VIP👸")) {
+        return interaction.reply({ content: "❌ Нет права изменять чужие имена!", ephemeral: true }).catch(()=>{});
       }
     }
 
-    if (interaction.commandName === "removerealname") {
-      if (!names[target.id])
-        return await interaction.reply({ content: "❌ Реальное имя у этого пользователя не установлено.", flags: 64 });
+    const MAX_NICK_LENGTH = 32;
+    const memberTarget = await interaction.guild.members.fetch(target.id);
+    const baseNick = memberTarget.displayName.split(" | ")[0];
+    const extraLength = 3 + name.length;
+    const baseNickTrimmed = (baseNick.length + extraLength > MAX_NICK_LENGTH)
+      ? baseNick.substring(0, MAX_NICK_LENGTH - extraLength)
+      : baseNick;
+    const newNick = `${baseNickTrimmed} | ${name}`;
 
-      const memberTarget = await interaction.guild.members.fetch(target.id);
-      const baseNick = memberTarget.displayName.split(" | ")[0];
-      delete names[target.id];
-      fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
+    names[target.id] = name;
+    fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
 
-      try {
-        await memberTarget.setNickname(baseNick);
-        await interaction.reply({ content: `✅ Реальное имя для ${target.username} удалено`, flags: 64 });
-      } catch {
-        await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", flags: 64 });
-      }
+    try {
+      await memberTarget.setNickname(newNick);
+      await saveNamesToGitHub(); // 👈 моментальное сохранение после установки имени
+      await interaction.reply({ content: `✅ Реальное имя для ${target.username} установлено: **${name}**`, ephemeral: true });
+    } catch {
+      await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
+    }
+  }
+
+  if (interaction.commandName === "removerealname") {
+    if (!names[target.id]) {
+      return interaction.reply({ content: "❌ Реальное имя у этого пользователя не установлено.", ephemeral: true });
     }
 
-    if (interaction.commandName === "ping") {
-      await interaction.reply({ content: "🏓 Понг! Бот жив и работает 😎", flags: 64 });
+    const memberTarget = await interaction.guild.members.fetch(target.id);
+    const baseNick = memberTarget.displayName.split(" | ")[0];
+    delete names[target.id];
+    fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
+
+    try {
+      await memberTarget.setNickname(baseNick);
+      await saveNamesToGitHub(); // 👈 моментальное сохранение после удаления имени
+      await interaction.reply({ content: `✅ Реальное имя для ${target.username} удалено`, ephemeral: true });
+    } catch {
+      await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
     }
-  } catch (err) {
-    console.error("Ошибка при обработке команды:", err);
+  }
+
+  if (interaction.commandName === "ping") {
+    await interaction.reply({ content: "🏓 Понг! Бот жив и работает 😎", ephemeral: true });
   }
 });
 
-// === Автообновление ника при ручной смене ===
+// === Автообновление ника ===
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   const id = newMember.id;
   if (!names[id]) return;
@@ -175,15 +172,13 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
   const baseNick = newMember.displayName.split(" | ")[0];
   const MAX_NICK_LENGTH = 32;
   const extraLength = 3 + realName.length;
-  const baseNickTrimmed = baseNick.length + extraLength > MAX_NICK_LENGTH
+  const baseNickTrimmed = (baseNick.length + extraLength > MAX_NICK_LENGTH)
     ? baseNick.substring(0, MAX_NICK_LENGTH - extraLength)
     : baseNick;
   const expected = `${baseNickTrimmed} | ${realName}`;
 
   if (newMember.nickname !== expected) {
-    try {
-      await newMember.setNickname(expected);
-    } catch {}
+    try { await newMember.setNickname(expected); } catch {}
   }
 });
 
