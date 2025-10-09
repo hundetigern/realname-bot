@@ -14,8 +14,8 @@ const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO = "hundetigern/realname-bot";
-const GITHUB_FILE_PATH = "data/names.json";
+const GITHUB_REPO = "hundetigern/realname-bot"; // репозиторий с кодом
+const GITHUB_FILE_PATH = "data/names.json"; // путь к файлу на GitHub
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !GITHUB_TOKEN) {
   console.error("❌ Не заданы DISCORD_BOT_TOKEN, CLIENT_ID, GUILD_ID или GITHUB_TOKEN");
@@ -110,7 +110,7 @@ client.on("interactionCreate", async interaction => {
   if (interaction.commandName === "setrealname") {
     const name = interaction.options.getString("name");
 
-    // Проверка на VIP
+    // Проверка на VIP для изменения чужого имени
     if (target.id !== interaction.user.id) {
       const member = await interaction.guild.members.fetch(interaction.user.id);
       if (!member.roles.cache.some(r => r.name === "🤴VIP👸")) {
@@ -132,7 +132,7 @@ client.on("interactionCreate", async interaction => {
 
     try {
       await memberTarget.setNickname(newNick);
-      await saveNamesToGitHub(); // 👈 моментальное сохранение после установки имени
+      await saveNamesToGitHub(); // моментальное сохранение после команды
       await interaction.reply({ content: `✅ Реальное имя для ${target.username} установлено: **${name}**`, ephemeral: true });
     } catch {
       await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
@@ -145,16 +145,15 @@ client.on("interactionCreate", async interaction => {
     }
 
     const memberTarget = await interaction.guild.members.fetch(target.id);
-    const baseNick = memberTarget.displayName.split(" | ")[0];
     delete names[target.id];
     fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
 
     try {
-      await memberTarget.setNickname(baseNick);
-      await saveNamesToGitHub(); // 👈 моментальное сохранение после удаления имени
-      await interaction.reply({ content: `✅ Реальное имя для ${target.username} удалено`, ephemeral: true });
+      await memberTarget.setNickname(null); // 👈 очищаем ник полностью на сервере
+      await saveNamesToGitHub(); // моментальное сохранение
+      await interaction.reply({ content: `✅ Реальное имя для ${target.username} удалено и серверный ник очищен`, ephemeral: true });
     } catch {
-      await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
+      await interaction.reply({ content: "❌ Не удалось очистить ник. Проверьте права бота.", ephemeral: true });
     }
   }
 
@@ -163,7 +162,7 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// === Автообновление ника ===
+// === Автообновление ника при ручной смене ===
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   const id = newMember.id;
   if (!names[id]) return;
