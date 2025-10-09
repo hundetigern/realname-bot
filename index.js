@@ -3,7 +3,7 @@ import fs from "fs";
 import express from "express";
 import { Octokit } from "@octokit/rest";
 
-// === Веб-сервер для Render ===
+// === Веб-сервер для Render / Replit ===
 const app = express();
 app.get("/", (req, res) => res.send("Bot is running!"));
 const PORT = process.env.PORT || 3000;
@@ -14,8 +14,8 @@ const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO = "hundetigern/realname-bot";
-const GITHUB_FILE_PATH = "data/names.json";
+const GITHUB_REPO = "hundetigern/realname-bot"; // твой репозиторий с кодом
+const GITHUB_FILE_PATH = "data/names.json"; // путь к файлу на GitHub
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !GITHUB_TOKEN) {
   console.error("❌ Не заданы DISCORD_BOT_TOKEN, CLIENT_ID, GUILD_ID или GITHUB_TOKEN");
@@ -24,7 +24,11 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID || !GITHUB_TOKEN) {
 
 // === Инициализация клиента ===
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+  ],
 });
 
 // === Инициализация GitHub ===
@@ -32,7 +36,9 @@ const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
 // === Работа с names.json ===
 const dataFile = "./data/names.json";
-let names = fs.existsSync(dataFile) ? JSON.parse(fs.readFileSync(dataFile, "utf8")) : {};
+let names = fs.existsSync(dataFile)
+  ? JSON.parse(fs.readFileSync(dataFile, "utf8"))
+  : {};
 
 // === Сохранение names.json на GitHub ===
 async function saveNamesToGitHub() {
@@ -100,11 +106,12 @@ client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   const target = interaction.options.getUser("target") || interaction.user;
+  const memberTarget = await interaction.guild.members.fetch(target.id);
 
   if (interaction.commandName === "setrealname") {
     const name = interaction.options.getString("name");
 
-    // Проверка на VIP, если меняют чужое имя
+    // Проверка на VIP при изменении чужого имени
     if (target.id !== interaction.user.id) {
       const member = await interaction.guild.members.fetch(interaction.user.id);
       if (!member.roles.cache.some(r => r.name === "🤴VIP👸")) {
@@ -112,23 +119,21 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    // Запрет повторного использования
+    // Запрет повторного использования без удаления
     if (names[target.id]) {
       return interaction.reply({
-        content: "❌ Не удалось обновить реальное имя. Сначала очистите предыдущую запись через /removerealname и повторите запрос.",
+        content: "❌ Не удалось обновить реальное имя. Очистите предыдущую запись через /removerealname и повторите запрос.",
         ephemeral: true
       });
     }
 
     // Максимальная длина ника
     const MAX_NICK_LENGTH = 32;
-    const memberTarget = await interaction.guild.members.fetch(target.id);
     const baseNick = memberTarget.displayName.split(" | ")[0];
-    const extraLength = 3 + name.length;
-
-    if (baseNick.length + extraLength > MAX_NICK_LENGTH) {
+    const extraLength = 3 + name.length; // " | " + длина реального имени
+    if (extraLength > MAX_NICK_LENGTH) {
       return interaction.reply({
-        content: `❌ Слишком длинное имя. Оно не помещается в Discord ник. Сократите длину.`,
+        content: "❌ Слишком длинное реальное имя! Уменьшите длину, чтобы итоговый ник не превышал 32 символа.",
         ephemeral: true
       });
     }
@@ -138,10 +143,13 @@ client.on("interactionCreate", async interaction => {
       : baseNick;
     const newNick = `${baseNickTrimmed} | ${name}`;
 
+    // Сохраняем имя и пушим на GitHub
+    names[target.id] = name;
+    fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
+    await saveNamesToGitHub();
+
     try {
       await memberTarget.setNickname(newNick);
-      names[target.id] = name;
-      await saveNamesToGitHub();
       await interaction.reply({ content: `✅ Реальное имя для ${target.username} установлено: **${name}**`, ephemeral: true });
     } catch {
       await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
@@ -153,14 +161,13 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({ content: "❌ Реальное имя у этого пользователя не установлено.", ephemeral: true });
     }
 
-    const memberTarget = await interaction.guild.members.fetch(target.id);
+    const baseNick = memberTarget.displayName.split(" | ")[0];
     delete names[target.id];
     fs.writeFileSync(dataFile, JSON.stringify(names, null, 2));
+    await saveNamesToGitHub();
 
     try {
-      // Очистка никнейма на сервере
-      await memberTarget.setNickname("");
-      await saveNamesToGitHub();
+      await memberTarget.setNickname(baseNick); // очищаем серверный ник до базового
       await interaction.reply({ content: `✅ Реальное имя для ${target.username} удалено`, ephemeral: true });
     } catch {
       await interaction.reply({ content: "❌ Не удалось изменить ник. Проверьте права бота.", ephemeral: true });
@@ -172,7 +179,7 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// === Автообновление ника при ручной смене на сервере ===
+// === Автообновление ника при ручной смене ===
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   const id = newMember.id;
   if (!names[id]) return;
